@@ -4671,60 +4671,87 @@ impl StacksChainState {
                     .expect("BUG: cost declined between executions");
 
                 match result {
-                    Ok((value, _, events)) => StacksTransactionReceipt {
-                        transaction: TransactionOrigin::Burn(deposit_nft_op.into()),
-                        events,
-                        result: value,
-                        post_condition_aborted: false,
-                        stx_burned: 0,
-                        contract_analysis: None,
-                        execution_cost,
-                        microblock_header: None,
-                        tx_index: 0,
-                    },
-                    Err(e) => {
-                        info!("DepositNft op processing error.";
-                              "error" => ?e,
-                              "txid" => %txid,
-                              "burn_block" => %burn_header_hash);
-
-                        // If deposit fails, create a withdrawal event to send NFT back to user
-                        let nft_withdraw_event =
-                            StacksTransactionEvent::SmartContractEvent(SmartContractEventData {
-                                key: (boot_code_id("subnet", true), "print".into()),
-                                value: TupleData::from_data(vec![
-                                    (
-                                        "type".into(),
-                                        Value::string_ascii_from_bytes("nft".as_bytes().to_vec())
-                                            .expect("Supplied string was not ASCII"),
-                                    ),
-                                    ("recipient".into(), Value::Principal(sender)),
-                                    ("id".into(), Value::UInt(id)),
-                                    (
-                                        "asset-contract".into(),
-                                        Value::Principal(PrincipalData::Contract(
-                                            subnet_contract_id,
-                                        )),
-                                    ),
-                                ])
-                                .expect("Failed to create tuple data.")
-                                .into(),
-                            });
-
-                        StacksTransactionReceipt {
-                            transaction: TransactionOrigin::Burn(deposit_nft_op.into()),
-                            events: vec![nft_withdraw_event],
-                            result: Value::err_none(),
+                    Ok((value, _, events)) => {
+                        // Return at least reciept for deposit
+                        let deposit_reciept = StacksTransactionReceipt {
+                            transaction: TransactionOrigin::Burn(deposit_nft_op.clone().into()),
+                            events,
+                            result: value,
                             post_condition_aborted: false,
                             stx_burned: 0,
                             contract_analysis: None,
                             execution_cost,
                             microblock_header: None,
                             tx_index: 0,
-                        }
+                        };
+
+                        // Figure out if we need to add more transaction reciepts
+                        let additional_reciepts = match &deposit_reciept.result {
+                            // If deposit fails, create a withdrawal reciept to send NFT back to user
+                            Value::Response(r) if r.committed == false => {
+                                // TODO: Figure out how this macro works and log some variables
+                                info!("DepositNft op returned error. Issue withdrawal tx");
+
+                                let nft_withdraw_event = StacksTransactionEvent::SmartContractEvent(
+                                    SmartContractEventData {
+                                        key: (boot_code_id("subnet", mainnet), "print".into()),
+                                        value: TupleData::from_data(vec![
+                                            (
+                                                "type".into(),
+                                                Value::string_ascii_from_bytes(
+                                                    "nft".as_bytes().to_vec(),
+                                                )
+                                                .expect("Supplied string was not ASCII"),
+                                            ),
+                                            ("sender".into(), Value::Principal(sender)),
+                                            ("id".into(), Value::UInt(id)),
+                                            (
+                                                "asset-contract".into(),
+                                                Value::Principal(PrincipalData::Contract(
+                                                    subnet_contract_id,
+                                                )),
+                                            ),
+                                        ])
+                                        .expect("Failed to create tuple data.")
+                                        .into(),
+                                    },
+                                );
+                                vec![StacksTransactionReceipt {
+                                    transaction: TransactionOrigin::Burn(deposit_nft_op.into()),
+                                    /*
+                                    transaction: TransactionOrigin::Stacks(StacksTransaction::new(
+                                        TransactionVersion::Testnet,
+                                        auth.clone(),
+                                        TransactionPayload::Coinbase(CoinbasePayload([0u8; 32])),
+                                    )),
+                                    */
+                                    events: vec![nft_withdraw_event],
+                                    result: Value::err_none(),
+                                    post_condition_aborted: false,
+                                    stx_burned: 0,
+                                    contract_analysis: None,
+                                    execution_cost: ExecutionCost::zero(),
+                                    microblock_header: None,
+                                    tx_index: 0,
+                                }]
+                            }
+                            _ => Vec::default()
+                        };
+
+                        [vec![deposit_reciept], additional_reciepts].concat()
+                    }
+                    Err(e) => {
+                        // Deposit was not processed, log and do nothing else?
+                        info!("DepositNft op processing error.";
+                              "error" => ?e,
+                              "txid" => %txid,
+                              "burn_block" => %burn_header_hash);
+
+                        Vec::default()
                     }
                 }
             })
+            .flatten()
             .collect()
     }
 
